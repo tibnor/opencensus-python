@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import atexit
-import logging
 
 from opencensus.common import utils as common_utils
 from opencensus.ext.azure.common import Options, utils
@@ -25,22 +24,27 @@ from opencensus.ext.azure.common.protocol import (
     MetricData,
 )
 from opencensus.ext.azure.common.storage import LocalFileStorage
-from opencensus.ext.azure.common.transport import TransportMixin
+from opencensus.ext.azure.common.transport import (
+    TransportMixin,
+    TransportStatusCode,
+)
 from opencensus.ext.azure.metrics_exporter import standard_metrics
+from opencensus.ext.azure.statsbeat.statsbeat_metrics import (
+    _NETWORK_STATSBEAT_NAMES,
+)
 from opencensus.metrics import transport
 from opencensus.metrics.export.metric_descriptor import MetricDescriptorType
 from opencensus.stats import stats as stats_module
 
 __all__ = ['MetricsExporter', 'new_metrics_exporter']
 
-logger = logging.getLogger(__name__)
-
 
 class MetricsExporter(TransportMixin, ProcessorMixin):
     """Metrics exporter for Microsoft Azure Monitor."""
 
-    def __init__(self, **options):
+    def __init__(self, is_stats=False, **options):
         self.options = Options(**options)
+        self._is_stats = is_stats
         utils.validate_instrumentation_key(self.options.instrumentation_key)
         if self.options.max_batch_size <= 0:
             raise ValueError('Max batch size must be at least 1.')
@@ -58,6 +62,8 @@ class MetricsExporter(TransportMixin, ProcessorMixin):
             )
         self._atexit_handler = atexit.register(self.shutdown)
         self.exporter_thread = None
+        # For redirects
+        self._consecutive_redirects = 0  # To prevent circular redirects
         super(MetricsExporter, self).__init__()
 
     def export_metrics(self, metrics):
@@ -70,14 +76,21 @@ class MetricsExporter(TransportMixin, ProcessorMixin):
         for batch in batched_envelopes:
             batch = self.apply_telemetry_processors(batch)
             result = self._transmit(batch)
+            # If statsbeat exporter and received signal to shutdown
+            if self._is_stats and result is \
+                    TransportStatusCode.STATSBEAT_SHUTDOWN:
+                from opencensus.ext.azure.statsbeat import statsbeat
+                statsbeat.shutdown_statsbeat_metrics()
+                return
             # Only store files if local storage enabled
-            if self.storage and result > 0:
-                self.storage.put(batch, result)
-
-        # If there is still room to transmit envelopes, transmit from storage
-        # if available
-        if len(envelopes) < self.options.max_batch_size:
-            self._transmit_from_storage()
+            if self.storage:
+                if result is TransportStatusCode.RETRY:
+                    self.storage.put(batch, self.options.minimum_retry_interval)  # noqa: E501
+                if result is TransportStatusCode.SUCCESS:
+                    # If there is still room to transmit envelopes,
+                    # transmit from storage if available
+                    if len(envelopes) < self.options.max_batch_size:
+                        self._transmit_from_storage()
 
     def metric_to_envelopes(self, metric):
         envelopes = []
@@ -88,41 +101,47 @@ class MetricsExporter(TransportMixin, ProcessorMixin):
             # Each time series will be uniquely identified by its
             # label values
             for time_series in metric.time_series:
-                # Using stats, time_series should only have one
-                # point which contains the aggregated value
-                data_point = self._create_data_points(
-                    time_series, md)[0]
+                # time_series should only have one point which
+                # contains the aggregated value
+                # time_series point list is never empty
+                point = time_series.points[0]
+                # we ignore None and 0 values for network statsbeats
+                if self._is_stats_exporter():
+                    if md.name in _NETWORK_STATSBEAT_NAMES:
+                        if not point.value.value:
+                            continue
+                data_point = DataPoint(
+                    ns=md.name,
+                    name=md.name,
+                    value=point.value.value
+                )
                 # The timestamp is when the metric was recorded
-                timestamp = time_series.points[0].timestamp
+                timestamp = point.timestamp
                 # Get the properties using label keys from metric
                 # and label values of the time series
-                properties = self._create_properties(time_series, md)
-                envelopes.append(self._create_envelope(data_point,
-                                                       timestamp,
-                                                       properties))
+                properties = self._create_properties(
+                    time_series,
+                    md.label_keys
+                )
+                envelopes.append(
+                    self._create_envelope(
+                        data_point,
+                        timestamp,
+                        properties
+                    )
+                )
         return envelopes
 
-    def _create_data_points(self, time_series, metric_descriptor):
-        """Convert a metric's OC time series to list of Azure data points."""
-        data_points = []
-        for point in time_series.points:
-            # TODO: Possibly encode namespace in name
-            data_point = DataPoint(ns=metric_descriptor.name,
-                                   name=metric_descriptor.name,
-                                   value=point.value.value)
-            data_points.append(data_point)
-        return data_points
-
-    def _create_properties(self, time_series, metric_descriptor):
+    def _create_properties(self, time_series, label_keys):
         properties = {}
         # We construct a properties map from the label keys and values. We
         # assume the ordering is already correct
-        for i in range(len(metric_descriptor.label_keys)):
+        for i in range(len(label_keys)):
             if time_series.label_values[i].value is None:
                 value = "null"
             else:
                 value = time_series.label_values[i].value
-            properties[metric_descriptor.label_keys[i].key] = value
+            properties[label_keys[i].key] = value
         return properties
 
     def _create_envelope(self, data_point, timestamp, properties):
@@ -131,7 +150,10 @@ class MetricsExporter(TransportMixin, ProcessorMixin):
             tags=dict(utils.azure_monitor_context),
             time=timestamp.isoformat(),
         )
-        envelope.name = "Microsoft.ApplicationInsights.Metric"
+        if self._is_stats:
+            envelope.name = "Statsbeat"
+        else:
+            envelope.name = "Microsoft.ApplicationInsights.Metric"
         data = MetricData(
             metrics=[data_point],
             properties=properties
@@ -140,9 +162,12 @@ class MetricsExporter(TransportMixin, ProcessorMixin):
         return envelope
 
     def shutdown(self):
-        # Flush the exporter thread
         if self.exporter_thread:
-            self.exporter_thread.close()
+            # flush if metrics exporter is not for stats
+            if not self._is_stats:
+                self.exporter_thread.close()
+            else:
+                self.exporter_thread.cancel()
         # Shutsdown storage worker
         if self.storage:
             self.storage.close()
@@ -157,4 +182,9 @@ def new_metrics_exporter(**options):
                                     producers,
                                     exporter,
                                     interval=exporter.options.export_interval)
+    # start statsbeat on exporter instantiation
+    if exporter._check_stats_collection():
+        # Import here to avoid circular dependencies
+        from opencensus.ext.azure.statsbeat import statsbeat
+        statsbeat.collect_statsbeat_metrics(exporter.options)
     return exporter

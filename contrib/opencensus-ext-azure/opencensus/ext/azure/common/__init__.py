@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import os
 import tempfile
 
@@ -21,6 +22,8 @@ INGESTION_ENDPOINT = 'ingestionendpoint'
 INSTRUMENTATION_KEY = 'instrumentationkey'
 TEMPDIR_PREFIX = "opencensus-python-"
 
+_logger = logging.getLogger(__name__)
+
 
 def process_options(options):
     # Connection string/ikey
@@ -29,6 +32,13 @@ def process_options(options):
     env_cs = parse_connection_string(
         os.getenv('APPLICATIONINSIGHTS_CONNECTION_STRING'))
     env_ikey = os.getenv('APPINSIGHTS_INSTRUMENTATIONKEY')
+
+    # Deprecation note about explicit instrumentation key usage
+    if (not code_cs and code_ikey) or (not env_cs and env_ikey):
+        _logger.warning(
+            "DeprecationWarning: Explicitly using instrumentation key is"
+            "deprecated. Please use a connection string instead."
+        )
 
     # The priority of which value takes on the instrumentation key is:
     # 1. Key from explicitly passed in connection string
@@ -46,7 +56,14 @@ def process_options(options):
     endpoint = code_cs.get(INGESTION_ENDPOINT) \
         or env_cs.get(INGESTION_ENDPOINT) \
         or 'https://dc.services.visualstudio.com'
-    options.endpoint = endpoint + '/v2/track'
+    options.endpoint = endpoint
+
+    # Authorization
+    # `azure.core.credentials.TokenCredential` class must be valid
+    if options.credential and not hasattr(options.credential, 'get_token'):
+        raise ValueError(
+            'Must pass in valid TokenCredential.'
+        )
 
     # storage path
     if options.storage_path is None:
@@ -101,13 +118,14 @@ class Options(BaseObject):
 
     _default = BaseObject(
         connection_string=None,
+        credential=None,  # Credential class used by AAD auth
         enable_local_storage=True,
-        enable_standard_metrics=True,
+        enable_standard_metrics=True,  # Used by metrics exporter, True to send standard metrics  # noqa: E501
         endpoint='https://dc.services.visualstudio.com/v2/track',
         export_interval=15.0,
         grace_period=5.0,
         instrumentation_key=None,
-        logging_sampling_rate=1.0,
+        logging_sampling_rate=1.0,  # Used by log exporter, controls sampling
         max_batch_size=100,
         minimum_retry_interval=60,  # minimum retry interval in seconds
         proxies=None,  # string maps url schemes to the url of the proxies

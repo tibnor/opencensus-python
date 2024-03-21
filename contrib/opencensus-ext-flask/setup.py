@@ -12,13 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
 from setuptools import find_packages, setup
 
-from version import __version__
+BASE_DIR = os.path.dirname(__file__)
+VERSION_FILENAME = os.path.join(
+    BASE_DIR, "opencensus", "ext", "flask", "common", "version.py"
+)
+PACKAGE_INFO = {}
+with open(VERSION_FILENAME) as f:
+    exec(f.read(), PACKAGE_INFO)
 
 setup(
     name='opencensus-ext-flask',
-    version=__version__,  # noqa
+    version=PACKAGE_INFO["__version__"],  # noqa
     author='OpenCensus Authors',
     author_email='census-developers@googlegroups.com',
     classifiers=[
@@ -34,13 +42,15 @@ setup(
         'Programming Language :: Python :: 3.5',
         'Programming Language :: Python :: 3.6',
         'Programming Language :: Python :: 3.7',
+        'Programming Language :: Python :: 3.8',
+        'Programming Language :: Python :: 3.9',
     ],
     description='OpenCensus Flask Integration',
     include_package_data=True,
     long_description=open('README.rst').read(),
     install_requires=[
-        'flask >= 0.12.3, < 2.0.0, != 1.1.3',
-        'opencensus >= 0.8.dev0, < 1.0.0',
+        'flask >= 0.12.3, < 3.0.0, != 1.1.3',
+        'opencensus >= 0.12.dev0, < 1.0.0',
     ],
     extras_require={},
     license='Apache-2.0',

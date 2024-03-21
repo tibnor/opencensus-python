@@ -16,6 +16,7 @@ import six
 
 import logging
 import sys
+import traceback
 
 import flask
 from google.rpc import code_pb2
@@ -24,6 +25,7 @@ from opencensus.common import configuration
 from opencensus.trace import (
     attributes_helper,
     execution_context,
+    integrations,
     print_exporter,
     samplers,
 )
@@ -39,6 +41,9 @@ HTTP_PATH = attributes_helper.COMMON_ATTRIBUTES['HTTP_PATH']
 HTTP_ROUTE = attributes_helper.COMMON_ATTRIBUTES['HTTP_ROUTE']
 HTTP_URL = attributes_helper.COMMON_ATTRIBUTES['HTTP_URL']
 HTTP_STATUS_CODE = attributes_helper.COMMON_ATTRIBUTES['HTTP_STATUS_CODE']
+ERROR_MESSAGE = attributes_helper.COMMON_ATTRIBUTES['ERROR_MESSAGE']
+ERROR_NAME = attributes_helper.COMMON_ATTRIBUTES['ERROR_NAME']
+STACKTRACE = attributes_helper.COMMON_ATTRIBUTES['STACKTRACE']
 
 EXCLUDELIST_PATHS = 'EXCLUDELIST_PATHS'
 EXCLUDELIST_HOSTNAMES = 'EXCLUDELIST_HOSTNAMES'
@@ -118,6 +123,9 @@ class FlaskMiddleware(object):
         self.excludelist_hostnames = settings.get(EXCLUDELIST_HOSTNAMES, None)
 
         self.setup_trace()
+
+        # pylint: disable=protected-access
+        integrations.add_integration(integrations._Integrations.FLASK)
 
     def setup_trace(self):
         self.app.before_request(self._before_request)
@@ -213,15 +221,27 @@ class FlaskMiddleware(object):
                         code=code_pb2.UNKNOWN,
                         message=str(exception)
                     )
-                    # try attaching the stack trace to the span, only populated
-                    # if the app has 'PROPAGATE_EXCEPTIONS', 'DEBUG', or
-                    # 'TESTING' enabled
-                    exc_type, _, exc_traceback = sys.exc_info()
+                    span.add_attribute(
+                        attribute_key=ERROR_NAME,
+                        attribute_value=exception.__class__.__name__)
+                    span.add_attribute(
+                        attribute_key=ERROR_MESSAGE,
+                        attribute_value=str(exception))
+
+                    if hasattr(exception, '__traceback__'):
+                        exc_traceback = exception.__traceback__
+                    else:
+                        exc_type, _, exc_traceback = sys.exc_info()
                     if exc_traceback is not None:
                         span.stack_trace = (
                             stack_trace.StackTrace.from_traceback(
                                 exc_traceback
                             )
+                        )
+                        span.add_attribute(
+                            attribute_key=STACKTRACE,
+                            attribute_value='\n'.join(
+                                traceback.format_tb(exc_traceback))
                         )
 
             tracer.end_span()

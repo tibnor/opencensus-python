@@ -20,8 +20,9 @@ import unittest
 import mock
 
 from opencensus.ext.azure import log_exporter
+from opencensus.ext.azure.common.transport import TransportStatusCode
 
-TEST_FOLDER = os.path.abspath('.test.logs')
+TEST_FOLDER = os.path.abspath('.test.log.exporter')
 
 
 def setUpModule():
@@ -51,7 +52,23 @@ class CustomLogHandler(log_exporter.BaseLogHandler):
         return self.callback(batch)
 
 
+class MockResponse(object):
+    def __init__(self, status_code, text, headers=None):
+        self.status_code = status_code
+        self.text = text
+        self.headers = headers
+
+
 class TestBaseLogHandler(unittest.TestCase):
+
+    def setUp(self):
+        os.environ["APPLICATIONINSIGHTS_STATSBEAT_DISABLED_ALL"] = "true"
+        return super(TestBaseLogHandler, self).setUp()
+
+    def tearDown(self):
+        del os.environ["APPLICATIONINSIGHTS_STATSBEAT_DISABLED_ALL"]
+        return super(TestBaseLogHandler, self).tearDown()
+
     def test_basic(self):
         logger = logging.getLogger(self.id())
         handler = CustomLogHandler(10, lambda batch: None)
@@ -73,16 +90,22 @@ class TestBaseLogHandler(unittest.TestCase):
 
 
 class TestAzureLogHandler(unittest.TestCase):
+
+    def setUp(self):
+        os.environ["APPLICATIONINSIGHTS_STATSBEAT_DISABLED_ALL"] = "true"
+        return super(TestAzureLogHandler, self).setUp()
+
+    def tearDown(self):
+        del os.environ["APPLICATIONINSIGHTS_STATSBEAT_DISABLED_ALL"]
+        return super(TestAzureLogHandler, self).tearDown()
+
     def test_ctor(self):
-        from opencensus.ext.azure.common import Options
-        instrumentation_key = Options._default.instrumentation_key
-        Options._default.instrumentation_key = None
-        self.assertRaises(ValueError, lambda: log_exporter.AzureLogHandler())
-        Options._default.instrumentation_key = instrumentation_key
+        self.assertRaises(ValueError, lambda: log_exporter.AzureLogHandler(connection_string="", instrumentation_key=""))  # noqa: E501
 
     def test_invalid_sampling_rate(self):
         with self.assertRaises(ValueError):
             log_exporter.AzureLogHandler(
+                enable_stats_metrics=False,
                 instrumentation_key='12345678-1234-5678-abcd-12345678abcd',
                 logging_sampling_rate=4.0,
             )
@@ -114,7 +137,7 @@ class TestAzureLogHandler(unittest.TestCase):
             500
         )
 
-    @mock.patch('requests.post', return_value=mock.Mock())
+    @mock.patch('requests.post', return_value=MockResponse(200, ''))
     def test_exception(self, requests_mock):
         logger = logging.getLogger(self.id())
         handler = log_exporter.AzureLogHandler(
@@ -131,7 +154,7 @@ class TestAzureLogHandler(unittest.TestCase):
         post_body = requests_mock.call_args_list[0][1]['data']
         self.assertTrue('ZeroDivisionError' in post_body)
 
-    @mock.patch('requests.post', return_value=mock.Mock())
+    @mock.patch('requests.post', return_value=MockResponse(200, ''))
     def test_exception_with_custom_properties(self, requests_mock):
         logger = logging.getLogger(self.id())
         handler = log_exporter.AzureLogHandler(
@@ -157,7 +180,7 @@ class TestAzureLogHandler(unittest.TestCase):
         self.assertTrue('key_1' in post_body)
         self.assertTrue('key_2' in post_body)
 
-    @mock.patch('requests.post', return_value=mock.Mock())
+    @mock.patch('requests.post', return_value=MockResponse(200, ''))
     def test_export_empty(self, request_mock):
         handler = log_exporter.AzureLogHandler(
             instrumentation_key='12345678-1234-5678-abcd-12345678abcd',
@@ -169,7 +192,7 @@ class TestAzureLogHandler(unittest.TestCase):
 
     @mock.patch('opencensus.ext.azure.log_exporter'
                 '.AzureLogHandler.log_record_to_envelope')
-    def test_export_failure(self, log_record_to_envelope_mock):
+    def test_export_retry(self, log_record_to_envelope_mock):
         log_record_to_envelope_mock.return_value = ['bar']
         handler = log_exporter.AzureLogHandler(
             instrumentation_key='12345678-1234-5678-abcd-12345678abcd',
@@ -177,9 +200,25 @@ class TestAzureLogHandler(unittest.TestCase):
         )
         with mock.patch('opencensus.ext.azure.log_exporter'
                         '.AzureLogHandler._transmit') as transmit:
-            transmit.return_value = 10
+            transmit.return_value = TransportStatusCode.RETRY
             handler._export(['foo'])
         self.assertEqual(len(os.listdir(handler.storage.path)), 1)
+        self.assertIsNone(handler.storage.get())
+        handler.close()
+
+    @mock.patch('opencensus.ext.azure.log_exporter'
+                '.AzureLogHandler.log_record_to_envelope')
+    def test_export_success(self, log_record_to_envelope_mock):
+        log_record_to_envelope_mock.return_value = ['bar']
+        handler = log_exporter.AzureLogHandler(
+            instrumentation_key='12345678-1234-5678-abcd-12345678abcd',
+            storage_path=os.path.join(TEST_FOLDER, self.id()),
+        )
+        with mock.patch('opencensus.ext.azure.log_exporter'
+                        '.AzureLogHandler._transmit') as transmit:
+            transmit.return_value = TransportStatusCode.SUCCESS
+            handler._export(['foo'])
+        self.assertEqual(len(os.listdir(handler.storage.path)), 0)
         self.assertIsNone(handler.storage.get())
         handler.close()
 
@@ -197,7 +236,7 @@ class TestAzureLogHandler(unittest.TestCase):
             '12345678-1234-5678-abcd-12345678abcd')
         handler.close()
 
-    @mock.patch('requests.post', return_value=mock.Mock())
+    @mock.patch('requests.post', return_value=MockResponse(200, ''))
     def test_log_record_with_custom_properties(self, requests_mock):
         logger = logging.getLogger(self.id())
         handler = log_exporter.AzureLogHandler(
@@ -218,7 +257,7 @@ class TestAzureLogHandler(unittest.TestCase):
         self.assertTrue('key_1' in post_body)
         self.assertTrue('key_2' in post_body)
 
-    @mock.patch('requests.post', return_value=mock.Mock())
+    @mock.patch('requests.post', return_value=MockResponse(200, ''))
     def test_log_with_invalid_custom_properties(self, requests_mock):
         logger = logging.getLogger(self.id())
         handler = log_exporter.AzureLogHandler(
@@ -235,7 +274,6 @@ class TestAzureLogHandler(unittest.TestCase):
         })
 
         handler.close()
-        self.assertEqual(len(os.listdir(handler.storage.path)), 0)
         post_body = requests_mock.call_args_list[0][1]['data']
         self.assertTrue('action_1_' in post_body)
         self.assertTrue('action_2_arg' in post_body)
@@ -244,7 +282,7 @@ class TestAzureLogHandler(unittest.TestCase):
         self.assertFalse('not_a_dict' in post_body)
         self.assertFalse('key_1' in post_body)
 
-    @mock.patch('requests.post', return_value=mock.Mock())
+    @mock.patch('requests.post', return_value=MockResponse(200, ''))
     def test_log_record_sampled(self, requests_mock):
         logger = logging.getLogger(self.id())
         handler = log_exporter.AzureLogHandler(
@@ -263,7 +301,7 @@ class TestAzureLogHandler(unittest.TestCase):
         self.assertTrue('Hello_World3' in post_body)
         self.assertTrue('Hello_World4' in post_body)
 
-    @mock.patch('requests.post', return_value=mock.Mock())
+    @mock.patch('requests.post', return_value=MockResponse(200, ''))
     def test_log_record_not_sampled(self, requests_mock):
         logger = logging.getLogger(self.id())
         handler = log_exporter.AzureLogHandler(
@@ -276,16 +314,20 @@ class TestAzureLogHandler(unittest.TestCase):
         logger.warning('Hello_World3')
         logger.warning('Hello_World4')
         handler.close()
-        self.assertFalse(requests_mock.called)
+        self.assertTrue(handler._queue.is_empty())
 
 
 class TestAzureEventHandler(unittest.TestCase):
+    def setUp(self):
+        os.environ["APPLICATIONINSIGHTS_STATSBEAT_DISABLED_ALL"] = "true"
+        return super(TestAzureEventHandler, self).setUp()
+
+    def tearDown(self):
+        del os.environ["APPLICATIONINSIGHTS_STATSBEAT_DISABLED_ALL"]
+        return super(TestAzureEventHandler, self).setUp()
+
     def test_ctor(self):
-        from opencensus.ext.azure.common import Options
-        instrumentation_key = Options._default.instrumentation_key
-        Options._default.instrumentation_key = None
-        self.assertRaises(ValueError, lambda: log_exporter.AzureEventHandler())
-        Options._default.instrumentation_key = instrumentation_key
+        self.assertRaises(ValueError, lambda: log_exporter.AzureEventHandler(connection_string="", instrumentation_key=""))  # noqa: E501
 
     def test_invalid_sampling_rate(self):
         with self.assertRaises(ValueError):
@@ -321,7 +363,7 @@ class TestAzureEventHandler(unittest.TestCase):
             500
         )
 
-    @mock.patch('requests.post', return_value=mock.Mock())
+    @mock.patch('requests.post', return_value=MockResponse(200, ''))
     def test_exception(self, requests_mock):
         logger = logging.getLogger(self.id())
         handler = log_exporter.AzureEventHandler(
@@ -338,7 +380,7 @@ class TestAzureEventHandler(unittest.TestCase):
         post_body = requests_mock.call_args_list[0][1]['data']
         self.assertTrue('ZeroDivisionError' in post_body)
 
-    @mock.patch('requests.post', return_value=mock.Mock())
+    @mock.patch('requests.post', return_value=MockResponse(200, ''))
     def test_exception_with_custom_properties(self, requests_mock):
         logger = logging.getLogger(self.id())
         handler = log_exporter.AzureEventHandler(
@@ -354,6 +396,11 @@ class TestAzureEventHandler(unittest.TestCase):
                 {
                         'key_1': 'value_1',
                         'key_2': 'value_2'
+                },
+                'custom_measurements':
+                {
+                    'measure_1': 1,
+                    'measure_2': 2
                 }
             }
             logger.exception('Captured an exception.', extra=properties)
@@ -363,8 +410,10 @@ class TestAzureEventHandler(unittest.TestCase):
         self.assertTrue('ZeroDivisionError' in post_body)
         self.assertTrue('key_1' in post_body)
         self.assertTrue('key_2' in post_body)
+        self.assertTrue('measure_1' in post_body)
+        self.assertTrue('measure_2' in post_body)
 
-    @mock.patch('requests.post', return_value=mock.Mock())
+    @mock.patch('requests.post', return_value=MockResponse(200, ''))
     def test_export_empty(self, request_mock):
         handler = log_exporter.AzureEventHandler(
             instrumentation_key='12345678-1234-5678-abcd-12345678abcd',
@@ -376,7 +425,7 @@ class TestAzureEventHandler(unittest.TestCase):
 
     @mock.patch('opencensus.ext.azure.log_exporter'
                 '.AzureEventHandler.log_record_to_envelope')
-    def test_export_failure(self, log_record_to_envelope_mock):
+    def test_export_retry(self, log_record_to_envelope_mock):
         log_record_to_envelope_mock.return_value = ['bar']
         handler = log_exporter.AzureEventHandler(
             instrumentation_key='12345678-1234-5678-abcd-12345678abcd',
@@ -384,9 +433,25 @@ class TestAzureEventHandler(unittest.TestCase):
         )
         with mock.patch('opencensus.ext.azure.log_exporter'
                         '.AzureEventHandler._transmit') as transmit:
-            transmit.return_value = 10
+            transmit.return_value = TransportStatusCode.RETRY
             handler._export(['foo'])
         self.assertEqual(len(os.listdir(handler.storage.path)), 1)
+        self.assertIsNone(handler.storage.get())
+        handler.close()
+
+    @mock.patch('opencensus.ext.azure.log_exporter'
+                '.AzureEventHandler.log_record_to_envelope')
+    def test_export_success(self, log_record_to_envelope_mock):
+        log_record_to_envelope_mock.return_value = ['bar']
+        handler = log_exporter.AzureEventHandler(
+            instrumentation_key='12345678-1234-5678-abcd-12345678abcd',
+            storage_path=os.path.join(TEST_FOLDER, self.id()),
+        )
+        with mock.patch('opencensus.ext.azure.log_exporter'
+                        '.AzureEventHandler._transmit') as transmit:
+            transmit.return_value = TransportStatusCode.SUCCESS
+            handler._export(['foo'])
+        self.assertEqual(len(os.listdir(handler.storage.path)), 0)
         self.assertIsNone(handler.storage.get())
         handler.close()
 
@@ -404,7 +469,7 @@ class TestAzureEventHandler(unittest.TestCase):
             '12345678-1234-5678-abcd-12345678abcd')
         handler.close()
 
-    @mock.patch('requests.post', return_value=mock.Mock())
+    @mock.patch('requests.post', return_value=MockResponse(200, ''))
     def test_log_record_with_custom_properties(self, requests_mock):
         logger = logging.getLogger(self.id())
         handler = log_exporter.AzureEventHandler(
@@ -417,6 +482,11 @@ class TestAzureEventHandler(unittest.TestCase):
                 {
                     'key_1': 'value_1',
                     'key_2': 'value_2'
+                },
+            'custom_measurements':
+                {
+                    'measure_1': 1,
+                    'measure_2': 2
                 }
             })
         handler.close()
@@ -424,8 +494,10 @@ class TestAzureEventHandler(unittest.TestCase):
         self.assertTrue('action' in post_body)
         self.assertTrue('key_1' in post_body)
         self.assertTrue('key_2' in post_body)
+        self.assertTrue('measure_1' in post_body)
+        self.assertTrue('measure_2' in post_body)
 
-    @mock.patch('requests.post', return_value=mock.Mock())
+    @mock.patch('requests.post', return_value=MockResponse(200, ''))
     def test_log_with_invalid_custom_properties(self, requests_mock):
         logger = logging.getLogger(self.id())
         handler = log_exporter.AzureEventHandler(
@@ -435,23 +507,24 @@ class TestAzureEventHandler(unittest.TestCase):
         logger.addHandler(handler)
         logger.warning('action_1_%s', None)
         logger.warning('action_2_%s', 'arg', extra={
-            'custom_dimensions': 'not_a_dict'
+            'custom_dimensions': 'not_a_dict',
+            'custom_measurements': 'also_not'
         })
         logger.warning('action_3_%s', 'arg', extra={
             'notcustom_dimensions': {'key_1': 'value_1'}
         })
 
         handler.close()
-        self.assertEqual(len(os.listdir(handler.storage.path)), 0)
         post_body = requests_mock.call_args_list[0][1]['data']
         self.assertTrue('action_1_' in post_body)
         self.assertTrue('action_2_arg' in post_body)
         self.assertTrue('action_3_arg' in post_body)
 
         self.assertFalse('not_a_dict' in post_body)
+        self.assertFalse('also_not' in post_body)
         self.assertFalse('key_1' in post_body)
 
-    @mock.patch('requests.post', return_value=mock.Mock())
+    @mock.patch('requests.post', return_value=MockResponse(200, ''))
     def test_log_record_sampled(self, requests_mock):
         logger = logging.getLogger(self.id())
         handler = log_exporter.AzureEventHandler(
@@ -470,7 +543,7 @@ class TestAzureEventHandler(unittest.TestCase):
         self.assertTrue('Hello_World3' in post_body)
         self.assertTrue('Hello_World4' in post_body)
 
-    @mock.patch('requests.post', return_value=mock.Mock())
+    @mock.patch('requests.post', return_value=MockResponse(200, ''))
     def test_log_record_not_sampled(self, requests_mock):
         logger = logging.getLogger(self.id())
         handler = log_exporter.AzureEventHandler(

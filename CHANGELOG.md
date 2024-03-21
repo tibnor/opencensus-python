@@ -2,6 +2,51 @@
 
 ## Unreleased
 
+# 0.11.4
+Released 2024-01-03
+- Changed bit-mapping for `httpx` and `fastapi` integrations
+([#1239](https://github.com/census-instrumentation/opencensus-python/pull/1239))
+
+# 0.11.3
+Released 2023-09-18
+
+- Updated `azure` modules
+
+# 0.11.2
+Released 2023-03-10
+
+- Updated `azure`, `fastapi`,`flask` modules
+
+# 0.11.1
+Released 2023-01-18
+
+- Updated `azure`, `httpx` modules
+
+# 0.11.0
+Released 2022-08-03
+
+- Updated `azure`, `context`, `flask`, `requests` modules
+
+# 0.10.0
+Released 2022-07-05
+
+- Add kwargs to derived gauge
+([#1135](https://github.com/census-instrumentation/opencensus-python/pull/1135))
+
+# 0.9.0
+Released 2022-04-20
+
+- Make sure handler.flush() doesn't deadlock
+([#1112](https://github.com/census-instrumentation/opencensus-python/pull/1112))
+
+# 0.8.0
+Released 2021-10-05
+
+- Added integration tracking functionality, includes `django`, `flask`, `http-lib`, `logging`, `mysql`, `postgresql`, `pymongo`, `pymysql`, `pyramid`, `requests`, `sqlalchemy` modules
+([#1065](https://github.com/census-instrumentation/opencensus-python/pull/1065))
+- Support Python 3.8, 3.9
+([#1048](https://github.com/census-instrumentation/opencensus-python/pull/1048))
+
 # 0.7.13
 Released 2021-05-13
 
@@ -31,7 +76,7 @@ Released 2020-06-29
 Released 2020-06-17
 
 - Hotfix for breaking change
-  ([#915](https://github.com/census-instrumentation/opencensus-python/pull/915),
+  ([#915](https://github.com/census-instrumentation/opencensus-python/pull/915))
 
 ## 0.7.8
 Released 2020-06-17

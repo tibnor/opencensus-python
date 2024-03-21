@@ -20,9 +20,10 @@ import unittest
 import mock
 
 from opencensus.ext.azure import trace_exporter
+from opencensus.ext.azure.common.transport import TransportStatusCode
 from opencensus.trace.link import Link
 
-TEST_FOLDER = os.path.abspath('.test.exporter')
+TEST_FOLDER = os.path.abspath('.test.trace.exporter')
 
 
 def setUpModule():
@@ -40,12 +41,17 @@ def throw(exc_type, *args, **kwargs):
 
 
 class TestAzureExporter(unittest.TestCase):
+
+    def setUp(self):
+        os.environ["APPLICATIONINSIGHTS_STATSBEAT_DISABLED_ALL"] = "true"
+        return super(TestAzureExporter, self).setUp()
+
+    def tearDown(self):
+        del os.environ["APPLICATIONINSIGHTS_STATSBEAT_DISABLED_ALL"]
+        return super(TestAzureExporter, self).tearDown()
+
     def test_ctor(self):
-        from opencensus.ext.azure.common import Options
-        instrumentation_key = Options._default.instrumentation_key
-        Options._default.instrumentation_key = None
-        self.assertRaises(ValueError, lambda: trace_exporter.AzureExporter())
-        Options._default.instrumentation_key = instrumentation_key
+        self.assertRaises(ValueError, lambda: trace_exporter.AzureExporter(connection_string="", instrumentation_key=""))  # noqa: E501
 
     def test_init_exporter_with_proxies(self):
         exporter = trace_exporter.AzureExporter(
@@ -95,14 +101,14 @@ class TestAzureExporter(unittest.TestCase):
         exporter._stop()
 
     @mock.patch('opencensus.ext.azure.trace_exporter.AzureExporter.span_data_to_envelope')  # noqa: E501
-    def test_emit_failure(self, span_data_to_envelope_mock):
+    def test_emit_retry(self, span_data_to_envelope_mock):
         span_data_to_envelope_mock.return_value = ['bar']
         exporter = trace_exporter.AzureExporter(
             instrumentation_key='12345678-1234-5678-abcd-12345678abcd',
             storage_path=os.path.join(TEST_FOLDER, self.id()),
         )
         with mock.patch('opencensus.ext.azure.trace_exporter.AzureExporter._transmit') as transmit:  # noqa: E501
-            transmit.return_value = 10
+            transmit.return_value = TransportStatusCode.RETRY
             exporter.emit(['foo'])
         self.assertEqual(len(os.listdir(exporter.storage.path)), 1)
         self.assertIsNone(exporter.storage.get())
@@ -117,7 +123,7 @@ class TestAzureExporter(unittest.TestCase):
             storage_path=os.path.join(TEST_FOLDER, self.id()),
         )
         with mock.patch('opencensus.ext.azure.trace_exporter.AzureExporter._transmit') as transmit:  # noqa: E501
-            transmit.return_value = 0
+            transmit.return_value = TransportStatusCode.SUCCESS
             exporter.emit([])
             exporter.emit(['foo'])
             self.assertEqual(len(os.listdir(exporter.storage.path)), 0)
@@ -492,7 +498,7 @@ class TestAzureExporter(unittest.TestCase):
             'RequestData')
 
         # SpanKind.SERVER HTTP - with exceptions
-        envelopes = exporter.span_data_to_envelope(SpanData(
+        envelopes = list(exporter.span_data_to_envelope(SpanData(
             name='test',
             context=SpanContext(
                 trace_id='6e0c63257de34c90bf9efcd03927272e',
@@ -523,9 +529,10 @@ class TestAzureExporter(unittest.TestCase):
             same_process_as_parent_span=None,
             child_span_count=None,
             span_kind=SpanKind.SERVER,
-        ))
+        )))
+        self.assertEqual(len(envelopes), 2)
 
-        envelope = next(envelopes)
+        envelope = envelopes[0]
         self.assertEqual(
             envelope.iKey,
             '12345678-1234-5678-abcd-12345678abcd')
@@ -545,7 +552,7 @@ class TestAzureExporter(unittest.TestCase):
             envelope.data.baseType,
             'ExceptionData')
 
-        envelope = next(envelopes)
+        envelope = envelopes[1]
         self.assertEqual(
             envelope.iKey,
             '12345678-1234-5678-abcd-12345678abcd')

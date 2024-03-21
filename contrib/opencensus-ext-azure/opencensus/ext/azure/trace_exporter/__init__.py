@@ -28,7 +28,11 @@ from opencensus.ext.azure.common.protocol import (
     Request,
 )
 from opencensus.ext.azure.common.storage import LocalFileStorage
-from opencensus.ext.azure.common.transport import TransportMixin
+from opencensus.ext.azure.common.transport import (
+    TransportMixin,
+    TransportStatusCode,
+)
+from opencensus.ext.azure.statsbeat import statsbeat
 from opencensus.trace import attributes_helper
 from opencensus.trace.span import SpanKind
 
@@ -51,13 +55,14 @@ ERROR_NAME = attributes_helper.COMMON_ATTRIBUTES['ERROR_NAME']
 STACKTRACE = attributes_helper.COMMON_ATTRIBUTES['STACKTRACE']
 
 
-class AzureExporter(BaseExporter, ProcessorMixin, TransportMixin):
+class AzureExporter(BaseExporter, TransportMixin, ProcessorMixin):
     """An exporter that sends traces to Microsoft Azure Monitor.
 
     :param options: Options for the exporter.
     """
 
     def __init__(self, **options):
+        super(AzureExporter, self).__init__(**options)
         self.options = Options(**options)
         utils.validate_instrumentation_key(self.options.instrumentation_key)
         self.storage = None
@@ -70,8 +75,12 @@ class AzureExporter(BaseExporter, ProcessorMixin, TransportMixin):
                 source=self.__class__.__name__,
             )
         self._telemetry_processors = []
-        super(AzureExporter, self).__init__(**options)
         atexit.register(self._stop, self.options.grace_period)
+        # start statsbeat on exporter instantiation
+        if self._check_stats_collection():
+            statsbeat.collect_statsbeat_metrics(self.options)
+        # For redirects
+        self._consecutive_redirects = 0  # To prevent circular redirects
 
     def span_data_to_envelope(self, sd):
         envelope = Envelope(
@@ -87,19 +96,27 @@ class AzureExporter(BaseExporter, ProcessorMixin, TransportMixin):
             )
         if sd.span_kind == SpanKind.SERVER:
             if ERROR_MESSAGE in sd.attributes:
-                envelope.name = 'Microsoft.ApplicationInsights.Exception'
+                message = sd.attributes.get(ERROR_MESSAGE)
+                if not message:
+                    message = "Exception"
+                stack_trace = sd.attributes.get(STACKTRACE, [])
+                if not hasattr(stack_trace, '__iter__'):
+                    stack_trace = []
+                type_name = sd.attributes.get(ERROR_NAME, 'Exception')
+                exc_env = Envelope(**envelope)
+                exc_env.name = 'Microsoft.ApplicationInsights.Exception'
                 data = ExceptionData(
                     exceptions=[{
                         'id': 1,
-                        'outerId': '{}'.format(sd.span_id),
-                        'typeName': sd.attributes.get(ERROR_NAME, ''),
-                        'message': sd.attributes[ERROR_MESSAGE],
+                        'outerId': 0,
+                        'typeName': type_name,
+                        'message': message,
                         'hasFullStack': STACKTRACE in sd.attributes,
-                        'parsedStack': sd.attributes.get(STACKTRACE, None)
+                        'parsedStack': stack_trace
                     }],
                 )
-                envelope.data = Data(baseData=data, baseType='ExceptionData')
-                yield envelope
+                exc_env.data = Data(baseData=data, baseType='ExceptionData')
+                yield exc_env
 
             envelope.name = 'Microsoft.ApplicationInsights.Request'
             data = Request(
@@ -197,14 +214,17 @@ class AzureExporter(BaseExporter, ProcessorMixin, TransportMixin):
                 envelopes = self.apply_telemetry_processors(envelopes)
                 result = self._transmit(envelopes)
                 # Only store files if local storage enabled
-                if self.storage and result > 0:
-                    self.storage.put(envelopes, result)
+                if self.storage and result is TransportStatusCode.RETRY:
+                    self.storage.put(
+                        envelopes,
+                        self.options.minimum_retry_interval
+                    )
             if event:
-                if isinstance(event, QueueExitEvent):
+                if self.storage and isinstance(event, QueueExitEvent):
                     self._transmit_from_storage()  # send files before exit
                 event.set()
                 return
-            if len(batch) < self.options.max_batch_size:
+            if self.storage and len(batch) < self.options.max_batch_size:
                 self._transmit_from_storage()
         except Exception:
             logger.exception('Exception occurred while exporting the data.')

@@ -34,13 +34,15 @@ setup(
         'Programming Language :: Python :: 3.5',
         'Programming Language :: Python :: 3.6',
         'Programming Language :: Python :: 3.7',
+        'Programming Language :: Python :: 3.8',
+        'Programming Language :: Python :: 3.9',
     ],
     description='OpenCensus SQLAlchemy Integration',
     include_package_data=True,
     long_description=open('README.rst').read(),
     install_requires=[
-        'opencensus >= 0.8.dev0, < 1.0.0',
-        'SQLAlchemy >= 1.1.14, < 1.3.24',  # https://github.com/sqlalchemy/sqlalchemy/issues/6168 # noqa: E501
+        'opencensus >= 0.9.dev0, < 1.0.0',
+        'SQLAlchemy >= 1.1.14',
     ],
     extras_require={},
     license='Apache-2.0',

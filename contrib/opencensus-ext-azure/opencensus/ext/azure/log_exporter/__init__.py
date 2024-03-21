@@ -29,7 +29,11 @@ from opencensus.ext.azure.common.protocol import (
     Message,
 )
 from opencensus.ext.azure.common.storage import LocalFileStorage
-from opencensus.ext.azure.common.transport import TransportMixin
+from opencensus.ext.azure.common.transport import (
+    TransportMixin,
+    TransportStatusCode,
+)
+from opencensus.ext.azure.statsbeat import statsbeat
 from opencensus.trace import execution_context
 
 logger = logging.getLogger(__name__)
@@ -61,6 +65,8 @@ class BaseLogHandler(logging.Handler):
         self._queue = Queue(capacity=self.options.queue_capacity)
         self._worker = Worker(self._queue, self)
         self._worker.start()
+        # For redirects
+        self._consecutive_redirects = 0  # To prevent circular redirects
 
     def _export(self, batch, event=None):  # pragma: NO COVER
         try:
@@ -69,23 +75,32 @@ class BaseLogHandler(logging.Handler):
                 envelopes = self.apply_telemetry_processors(envelopes)
                 result = self._transmit(envelopes)
                 # Only store files if local storage enabled
-                if self.storage and result > 0:
-                    self.storage.put(envelopes, result)
-            if event:
-                if isinstance(event, QueueExitEvent):
-                    self._transmit_from_storage()  # send files before exit
-                return
-            if len(batch) < self.options.max_batch_size:
-                self._transmit_from_storage()
+                if self.storage:
+                    if result is TransportStatusCode.RETRY:
+                        self.storage.put(
+                            envelopes,
+                            self.options.minimum_retry_interval,
+                        )
+                    if result is TransportStatusCode.SUCCESS:
+                        if len(batch) < self.options.max_batch_size:
+                            self._transmit_from_storage()
+                    if event:
+                        if isinstance(event, QueueExitEvent):
+                            # send files before exit
+                            self._transmit_from_storage()
         finally:
             if event:
                 event.set()
 
-    def close(self):
-        if self.storage:
+    # Close is automatically called as part of logging shutdown
+    def close(self, timeout=None):
+        if not timeout and hasattr(self, "options"):
+            timeout = self.options.grace_period
+        if hasattr(self, "storage") and self.storage:
             self.storage.close()
-        if self._worker:
-            self._worker.stop()
+        if hasattr(self, "_worker") and self._worker:
+            self._worker.stop(timeout)
+        super(BaseLogHandler, self).close()
 
     def createLock(self):
         self.lock = None
@@ -96,7 +111,22 @@ class BaseLogHandler(logging.Handler):
     def log_record_to_envelope(self, record):
         raise NotImplementedError  # pragma: NO COVER
 
+    # Flush is automatically called as part of logging shutdown
     def flush(self, timeout=None):
+        if not hasattr(self, "_queue") or self._queue.is_empty():
+            return
+
+        # We must check the worker thread is alive, because otherwise flush
+        # is useless. Also, it would deadlock if no timeout is given, and the
+        # queue isn't empty.
+        # This is a very possible scenario during process termination, when
+        # atexit first calls handler.close() and then logging.shutdown(),
+        # that in turn calls handler.flush() without arguments.
+        if not self._worker.is_alive():
+            logger.warning("Can't flush %s, worker thread is dead. "
+                           "Any pending messages will be lost.", self)
+            return
+
         self._queue.flush(timeout=timeout)
 
 
@@ -154,8 +184,14 @@ class SamplingFilter(logging.Filter):
         return random.random() < self.probability
 
 
-class AzureLogHandler(TransportMixin, ProcessorMixin, BaseLogHandler):
+class AzureLogHandler(BaseLogHandler, TransportMixin, ProcessorMixin):
     """Handler for logging to Microsoft Azure Monitor."""
+
+    def __init__(self, **options):
+        super(AzureLogHandler, self).__init__(**options)
+        # start statsbeat on exporter instantiation
+        if self._check_stats_collection():
+            statsbeat.collect_statsbeat_metrics(self.options)
 
     def log_record_to_envelope(self, record):
         envelope = create_envelope(self.options.instrumentation_key, record)
@@ -195,6 +231,11 @@ class AzureLogHandler(TransportMixin, ProcessorMixin, BaseLogHandler):
             if exctype is not None:
                 exc_type = exctype.__name__
 
+            if not exc_type:
+                exc_type = "Exception"
+            if not message:
+                message = "Exception"
+
             envelope.name = 'Microsoft.ApplicationInsights.Exception'
 
             data = ExceptionData(
@@ -224,6 +265,12 @@ class AzureLogHandler(TransportMixin, ProcessorMixin, BaseLogHandler):
 class AzureEventHandler(TransportMixin, ProcessorMixin, BaseLogHandler):
     """Handler for sending custom events to Microsoft Azure Monitor."""
 
+    def __init__(self, **options):
+        super(AzureEventHandler, self).__init__(**options)
+        # start statsbeat on exporter instantiation
+        if self._check_stats_collection():
+            statsbeat.collect_statsbeat_metrics(self.options)
+
     def log_record_to_envelope(self, record):
         envelope = create_envelope(self.options.instrumentation_key, record)
 
@@ -232,10 +279,16 @@ class AzureEventHandler(TransportMixin, ProcessorMixin, BaseLogHandler):
                 isinstance(record.custom_dimensions, dict)):
             properties.update(record.custom_dimensions)
 
+        measurements = {}
+        if (hasattr(record, 'custom_measurements') and
+                isinstance(record.custom_measurements, dict)):
+            measurements.update(record.custom_measurements)
+
         envelope.name = 'Microsoft.ApplicationInsights.Event'
         data = Event(
             name=self.format(record),
             properties=properties,
+            measurements=measurements,
         )
         envelope.data = Data(baseData=data, baseType='EventData')
 

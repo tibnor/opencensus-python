@@ -29,6 +29,7 @@ from opencensus.common import configuration
 from opencensus.trace import (
     attributes_helper,
     execution_context,
+    integrations,
     print_exporter,
     samplers,
 )
@@ -147,8 +148,8 @@ class OpencensusMiddleware(MiddlewareMixin):
     
     _is_coroutine = False
 
-    def __init__(self, get_response=None):
-        self.get_response = get_response
+    def __init__(self, get_response):
+        super(OpencensusMiddleware, self).__init__(get_response)
         settings = getattr(django.conf.settings, 'OPENCENSUS', {})
         settings = settings.get('TRACE', {})
 
@@ -173,6 +174,9 @@ class OpencensusMiddleware(MiddlewareMixin):
 
         if django.VERSION >= (2,):  # pragma: NO COVER
             connection.execute_wrappers.append(_trace_db_call)
+
+        # pylint: disable=protected-access
+        integrations.add_integration(integrations._Integrations.DJANGO)
 
     def process_request(self, request):
         """Called on each request, before Django decides which view to execute.
